@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import fs from "fs";
 import path from "path";
 import https from "https";
@@ -92,7 +90,7 @@ function confluenceRequest(method, endpoint, payload = null) {
           try {
             parsed = chunks ? JSON.parse(chunks) : null;
           } catch {
-            // keep raw text
+            parsed = chunks;
           }
 
           resolve({
@@ -115,10 +113,27 @@ function confluenceRequest(method, endpoint, payload = null) {
   });
 }
 
+function buildUserSearchEndpoint(query, limit = 10) {
+  const safeQuery = String(query || "").replace(/"/g, '\\"').trim();
+  const cql = `user.fullname~"${safeQuery}"`;
+  return `/rest/api/search/user?cql=${encodeURIComponent(cql)}&limit=${encodeURIComponent(limit)}`;
+}
+
+function mapUserResult(item) {
+  const user = item?.user || item || {};
+  return {
+    accountId: user.accountId || null,
+    displayName: user.displayName || item?.title || null,
+    publicName: user.publicName || null,
+    fullName: user.displayName || user.publicName || item?.title || null,
+    accountType: user.accountType || null,
+  };
+}
+
 const server = new Server(
   {
     name: "confluence-mcp-server",
-    version: "1.3.0",
+    version: "1.4.0",
   },
   {
     capabilities: {
@@ -179,6 +194,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             pageId: { type: "string" },
           },
           required: ["pageId"],
+        },
+      },
+      {
+        name: "search_confluence_users",
+        description: "Search Confluence users by display/full name and return account IDs for mentions",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "number", default: 10 },
+          },
+          required: ["query"],
         },
       },
     ],
@@ -366,6 +393,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   version: response.data.version.number,
                   content: response.data.body.storage.value,
                   url: `${CONFLUENCE_URL}${response.data._links.webui}`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case "search_confluence_users": {
+        const { query, limit = 10 } = args;
+
+        const response = await confluenceRequest(
+          "GET",
+          buildUserSearchEndpoint(query, limit)
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `Unexpected status: ${response.status} - ${JSON.stringify(response.data)}`
+          );
+        }
+
+        const users = (response.data.results || response.data || [])
+          .map(mapUserResult)
+          .filter((u) => u.accountId);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  total: users.length,
+                  users,
                 },
                 null,
                 2

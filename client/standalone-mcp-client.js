@@ -52,12 +52,8 @@ function extractJiraKeys(text) {
   return [...new Set((text.match(/\b[A-Z][A-Z0-9]+-\d+\b/g) || []).map((x) => x.trim()))];
 }
 
-/**
- * Extract likely speaker names from Teams transcript lines like:
- * "Prasad, Kislai:" or "N, Umasankar:"
- */
 function extractSpeakers(transcript) {
-  const matches = transcript.match(/^[A-Za-z ,.'-]+:/gm) || [];
+  const matches = transcript.match(/^[A-Za-z ,.'()-]+:/gm) || [];
   return [...new Set(matches.map((x) => x.replace(':', '').trim()))];
 }
 
@@ -88,16 +84,75 @@ function escapeHtml(value = '') {
     .replace(/'/g, '&#39;');
 }
 
+function escapeXmlAttr(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function normalizeNameForMatch(value = '') {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractNameTokens(name = '') {
+  const cleaned = String(name)
+    .replace(/[,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return [];
+
+  const parts = cleaned.split(' ').filter(Boolean);
+  const tokens = new Set();
+
+  tokens.add(cleaned);
+
+  if (parts.length >= 2) {
+    tokens.add(`${parts[0]} ${parts[1]}`);
+    tokens.add(`${parts[1]} ${parts[0]}`);
+  }
+
+  if (parts.length >= 3) {
+    tokens.add(`${parts[parts.length - 1]} ${parts[0]}`);
+    tokens.add(`${parts[0]} ${parts[parts.length - 1]}`);
+  }
+
+  parts.forEach((p) => tokens.add(p));
+
+  return [...tokens];
+}
+
+function sanitizeConfluenceHtml(html) {
+  return String(html || '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/–/g, '-')
+    .replace(/—/g, '-')
+    .replace(/…/g, '...')
+    .replace(/\u202F/g, ' ')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u2011/g, '-')
+    .replace(/\u2013/g, '-')
+    .replace(/\u2014/g, '-')
+    .replace(/\u2192/g, '->')
+    .trim();
 }
 
 function normalizeMeetingDoc(doc, transcriptFile) {
   return {
     meeting_metadata: {
-      meeting_title:
-        doc?.meeting_metadata?.meeting_title ||
-        `Meeting Minutes - ${new Date().toISOString().slice(0, 10)}`,
+      meeting_title: doc?.meeting_metadata?.meeting_title || null,
       transcript_file: transcriptFile,
       date: doc?.meeting_metadata?.date || null,
       time: doc?.meeting_metadata?.time || null,
@@ -118,22 +173,124 @@ function normalizeMeetingDoc(doc, transcriptFile) {
       priority: item?.priority || null,
       jira_reference: item?.jira_reference || null,
       evidence: item?.evidence || '',
+      assignee_confluence_account_id: null,
     })),
     jira_issues_discussed: normalizeArray(doc?.jira_issues_discussed).map((item) => ({
       key: item?.key || '',
       summary: item?.summary || '',
       status: item?.status || '',
       assignee: item?.assignee || null,
+      url: item?.url || null,
     })),
     next_steps: normalizeArray(doc?.next_steps),
     risks_or_open_questions: normalizeArray(doc?.risks_or_open_questions),
   };
 }
 
-function renderConfluenceStorage(doc) {
+function parseAnyDate(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+  const str = String(value).trim();
+  if (!str) return null;
+
+  const iso = new Date(str);
+  if (!Number.isNaN(iso.getTime())) return iso;
+
+  const ddmmyyyy = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (ddmmyyyy) {
+    const [, d, m, y] = ddmmyyyy;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    if (!Number.isNaN(dt.getTime())) return dt;
+  }
+
+  return null;
+}
+
+function formatDateForTitle(dateValue) {
+  const date = parseAnyDate(dateValue) || new Date();
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function cleanTitlePart(value) {
+  return String(value || 'Meeting Minutes')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function deriveMeetingTitle(doc) {
+  return (
+    doc?.meeting_metadata?.meeting_title ||
+    doc?.agenda_items?.[0] ||
+    'Meeting Minutes'
+  );
+}
+
+function buildDocumentTitle(doc) {
+  const datePart = formatDateForTitle(doc?.meeting_metadata?.date);
+  const titlePart = cleanTitlePart(deriveMeetingTitle(doc));
+  return `${datePart}-${titlePart}`;
+}
+
+function buildIssueUrl(issueKey) {
+  return `${requireEnv('JIRA_URL').replace(/\/$/, '')}/browse/${encodeURIComponent(issueKey)}`;
+}
+
+function renderConfluenceUserMention(accountId, fallbackText) {
+  if (!accountId) {
+    return escapeHtml(fallbackText || '');
+  }
+
+  return `<ac:link><ri:user ri:account-id="${escapeXmlAttr(accountId)}" /></ac:link>`;
+}
+
+function renderIssueReference(issueRef, issueUrlMap) {
+  if (!issueRef) return '';
+  const ref = String(issueRef).trim();
+  if (!ref) return '';
+
+  const issueKeyMatch = ref.match(/\b[A-Z][A-Z0-9]+-\d+\b/);
+  if (!issueKeyMatch) {
+    return escapeHtml(ref);
+  }
+
+  const key = issueKeyMatch[0];
+  const url = issueUrlMap[key] || buildIssueUrl(key);
+  return `<a href="${escapeXmlAttr(url)}">${escapeHtml(key)}</a>`;
+}
+
+function renderDynamicJiraMacro(issueKeys) {
+  if (!issueKeys.length) {
+    return '<p>No Jira issues discussed.</p>';
+  }
+
+  const uniqueKeys = [...new Set(issueKeys)];
+  const jql = `key in (${uniqueKeys.join(',')})`;
+
+  return [
+    '<ac:structured-macro ac:name="jira" ac:schema-version="1">',
+    '<ac:parameter ac:name="columns">key,summary,status,assignee</ac:parameter>',
+    `<ac:parameter ac:name="maximumIssues">${uniqueKeys.length}</ac:parameter>`,
+    `<ac:parameter ac:name="jqlQuery">${escapeHtml(jql)}</ac:parameter>`,
+    '</ac:structured-macro>',
+  ].join('');
+}
+
+function renderConfluenceStorage(doc, options = {}) {
+  const {
+    assigneeDirectory = {},
+    issueUrlMap = {},
+    dynamicIssueKeys = [],
+  } = options;
+
   const attendeesHtml = doc.meeting_metadata.attendees
     .map((x) => `<li>${escapeHtml(x)}</li>`)
     .join('');
+
   const agendaHtml = doc.agenda_items.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
   const discussionHtml = doc.discussion_points
     .map((x) => `<h3>${escapeHtml(x.topic)}</h3><p>${escapeHtml(x.summary)}</p>`)
@@ -143,38 +300,31 @@ function renderConfluenceStorage(doc) {
   const risksHtml = doc.risks_or_open_questions.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
 
   const actionRows = doc.action_items
-    .map(
-      (x) => `
+    .map((x) => {
+      const assigneeAccountId =
+        x.assignee_confluence_account_id ||
+        assigneeDirectory[normalizeNameForMatch(x.assignee)]?.accountId ||
+        null;
+
+      return `
         <tr>
           <td>${escapeHtml(x.description)}</td>
-          <td>${escapeHtml(x.assignee || '')}</td>
+          <td>${renderConfluenceUserMention(assigneeAccountId, x.assignee || '')}</td>
           <td>${escapeHtml(x.due_date || '')}</td>
           <td>${escapeHtml(x.priority || '')}</td>
-          <td>${escapeHtml(x.jira_reference || '')}</td>
-        </tr>`
-    )
+          <td>${renderIssueReference(x.jira_reference, issueUrlMap)}</td>
+        </tr>`;
+    })
     .join('');
 
-  const jiraRows = doc.jira_issues_discussed
-    .map(
-      (x) => `
-        <tr>
-          <td>${escapeHtml(x.key)}</td>
-          <td>${escapeHtml(x.summary)}</td>
-          <td>${escapeHtml(x.status)}</td>
-          <td>${escapeHtml(x.assignee || '')}</td>
-        </tr>`
-    )
-    .join('');
+  const jiraMacroHtml = renderDynamicJiraMacro(dynamicIssueKeys);
 
   return `
-    <h1>${escapeHtml(doc.meeting_metadata.meeting_title)}</h1>
+    <h1>${escapeHtml(buildDocumentTitle(doc))}</h1>
     <h2>Meeting Details</h2>
     <p>
-      <strong>Date:</strong> ${escapeHtml(doc.meeting_metadata.date || '')}<br/>
-      <strong>Time:</strong> ${escapeHtml(doc.meeting_metadata.time || '')}<br/>
-      <strong>Duration:</strong> ${escapeHtml(doc.meeting_metadata.duration || '')}<br/>
-      <strong>Transcript File:</strong> ${escapeHtml(doc.meeting_metadata.transcript_file || '')}
+      <strong>Date:</strong> ${escapeHtml(formatDateForTitle(doc.meeting_metadata.date))}<br/>
+      <strong>Duration:</strong> ${escapeHtml(doc.meeting_metadata.duration || '')}
     </p>
     <h3>Attendees</h3>
     <ul>${attendeesHtml}</ul>
@@ -200,17 +350,7 @@ function renderConfluenceStorage(doc) {
       </tbody>
     </table>
     <h2>Jira Issues Discussed</h2>
-    <table>
-      <tbody>
-        <tr>
-          <th>Key</th>
-          <th>Summary</th>
-          <th>Status</th>
-          <th>Assignee</th>
-        </tr>
-        ${jiraRows}
-      </tbody>
-    </table>
+    ${jiraMacroHtml}
     <h2>Next Steps</h2>
     <ul>${nextStepsHtml}</ul>
     <h2>Risks / Open Questions</h2>
@@ -218,23 +358,6 @@ function renderConfluenceStorage(doc) {
     <h4><i>AI generated meeting notes</i></h4>
   `
     .replace(/\n\s*/g, ' ')
-    .trim();
-}
-
-function sanitizeConfluenceHtml(html) {
-  return String(html || '')
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
-    .replace(/\n+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .replace(/–/g, '-')
-    .replace(/—/g, '-')
-    .replace(/…/g, '...')
-    .replace(/\u202F/g, ' ')
-    .replace(/\u00A0/g, ' ')
-    .replace(/\u2011/g, '-')
-    .replace(/\u2013/g, '-')
-    .replace(/\u2014/g, '-')
-    .replace(/\u2192/g, '->')
     .trim();
 }
 
@@ -270,10 +393,6 @@ class McpClientWrapper {
 
     await this.client.connect(this.transport);
     return this;
-  }
-
-  async listTools() {
-    return this.client.listTools();
   }
 
   async callTool(name, args) {
@@ -347,7 +466,107 @@ async function fetchJiraContext(jiraClient, jiraKeys) {
   });
 
   const payload = JSON.parse(getTextContent(result));
-  return payload.issues || [];
+  return (payload.issues || []).map((issue) => ({
+    ...issue,
+    url: issue.url || buildIssueUrl(issue.key),
+  }));
+}
+
+async function resolveConfluenceUsers(confluenceClient, names) {
+  const uniqueNames = [...new Set(names.filter(Boolean).map((x) => String(x).trim()).filter(Boolean))];
+  const directory = {};
+
+  for (const originalName of uniqueNames) {
+    const normalized = normalizeNameForMatch(originalName);
+    const queries = extractNameTokens(originalName);
+
+    let foundUser = null;
+
+    for (const query of queries) {
+      const result = await confluenceClient.callTool('search_confluence_users', {
+        query,
+        limit: 10,
+      });
+
+      const payload = JSON.parse(getTextContent(result));
+      const users = payload.users || [];
+
+      foundUser =
+        users.find((u) => normalizeNameForMatch(u.displayName) === normalized) ||
+        users.find((u) => normalizeNameForMatch(u.publicName) === normalized) ||
+        users.find((u) => normalizeNameForMatch(u.fullName) === normalized) ||
+        users.find((u) => {
+          const dn = normalizeNameForMatch(u.displayName);
+          return queries.some((q) => dn === normalizeNameForMatch(q));
+        }) ||
+        users[0] ||
+        null;
+
+      if (foundUser?.accountId) {
+        directory[normalized] = foundUser;
+        break;
+      }
+    }
+  }
+
+  return directory;
+}
+
+async function resolveJiraUsers(jiraClient, names) {
+  const uniqueNames = [...new Set(names.filter(Boolean).map((x) => String(x).trim()).filter(Boolean))];
+  const directory = {};
+
+  for (const originalName of uniqueNames) {
+    const normalized = normalizeNameForMatch(originalName);
+    const queries = extractNameTokens(originalName);
+
+    let foundUser = null;
+
+    for (const query of queries) {
+      const result = await jiraClient.callTool('search_jira_users', {
+        query,
+        maxResults: 10,
+      });
+
+      const payload = JSON.parse(getTextContent(result));
+      const users = payload.users || [];
+
+      foundUser =
+        users.find((u) => normalizeNameForMatch(u.displayName) === normalized) ||
+        users.find((u) => {
+          const dn = normalizeNameForMatch(u.displayName);
+          return queries.some((q) => dn === normalizeNameForMatch(q));
+        }) ||
+        users[0] ||
+        null;
+
+      if (foundUser?.accountId) {
+        directory[normalized] = foundUser;
+        break;
+      }
+    }
+  }
+
+  return directory;
+}
+
+async function resolveAssigneeDirectory({ confluenceClient, jiraClient, names }) {
+  const confluenceDirectory = await resolveConfluenceUsers(confluenceClient, names);
+
+  const unresolved = names.filter(
+    (name) => !confluenceDirectory[normalizeNameForMatch(name)]
+  );
+
+  if (!unresolved.length) {
+    return confluenceDirectory;
+  }
+
+  const jiraDirectory = await resolveJiraUsers(jiraClient, unresolved);
+
+  return {
+    ...jiraDirectory,
+    ...confluenceDirectory,
+  };
 }
 
 function buildMessages({ transcript, transcriptFile, jiraKeys, jiraContext, speakerHints }) {
@@ -367,9 +586,9 @@ Return ONLY valid JSON.
 Do NOT include reasoning.
 Do NOT include commentary.
 Do NOT wrap the response in markdown.
-Do NOT repeat attendee names.
 Be concise.
 
+Infer a concise meeting title whenever possible.
 If a value is unknown:
 - use null
 - or use []
@@ -397,7 +616,7 @@ ${JSON.stringify(jiraContext, null, 2)}
 Schema:
 {
   "meeting_metadata": {
-    "meeting_title": "string",
+    "meeting_title": "string|null",
     "date": "string|null",
     "time": "string|null",
     "duration": "string|null",
@@ -424,7 +643,8 @@ Schema:
       "key": "string",
       "summary": "string",
       "status": "string",
-      "assignee": "string|null"
+      "assignee": "string|null",
+      "url": "string|null"
     }
   ],
   "next_steps": ["string"],
@@ -438,6 +658,8 @@ Rules:
 - Only include deadlines explicitly mentioned
 - Use Jira context only to enrich issue information
 - Deduplicate attendees strictly
+- If Jira issues are discussed, use their keys from Jira context
+- Return a concise, human-readable meeting title if it can be inferred
 
 Transcript:
 ${safeTranscript}
@@ -462,7 +684,7 @@ async function processTranscript(transcriptFile) {
     [path.join(MCP_SERVERS_DIR, 'jira-server.js')],
     {
       JIRA_URL: requireEnv('JIRA_URL'),
-      JIRA_EMAIL: requireEnv('JIRA_EMAIL'),
+      JIRA_EMAIL: process.env.JIRA_EMAIL || '',
       JIRA_API_TOKEN: requireEnv('JIRA_API_TOKEN'),
     }
   ).connect();
@@ -473,7 +695,7 @@ async function processTranscript(transcriptFile) {
     [path.join(MCP_SERVERS_DIR, 'confluence-server.js')],
     {
       CONFLUENCE_URL: requireEnv('CONFLUENCE_URL'),
-      CONFLUENCE_EMAIL: requireEnv('CONFLUENCE_EMAIL'),
+      CONFLUENCE_EMAIL: process.env.CONFLUENCE_EMAIL || '',
       CONFLUENCE_API_TOKEN: requireEnv('CONFLUENCE_API_TOKEN'),
     }
   ).connect();
@@ -496,19 +718,71 @@ async function processTranscript(transcriptFile) {
     );
 
     const meetingDoc = normalizeMeetingDoc(llmResult, transcriptFile);
-    const confluenceHtml = sanitizeConfluenceHtml(renderConfluenceStorage(meetingDoc));
+
+    const actionAssignees = meetingDoc.action_items.map((x) => x.assignee).filter(Boolean);
+
+    const assigneeDirectory = await resolveAssigneeDirectory({
+      confluenceClient,
+      jiraClient,
+      names: actionAssignees,
+    });
+
+    await appendLog(
+      'audit.log',
+      `[${runId}] Resolved assignees: ${JSON.stringify(assigneeDirectory)}`
+    );
+
+    meetingDoc.action_items = meetingDoc.action_items.map((item) => {
+      const match = assigneeDirectory[normalizeNameForMatch(item.assignee)];
+      return {
+        ...item,
+        assignee_confluence_account_id: match?.accountId || null,
+      };
+    });
+
+    const dynamicIssueKeys = [
+      ...new Set([
+        ...jiraContext.map((issue) => issue.key),
+        ...meetingDoc.jira_issues_discussed.map((issue) => issue.key).filter(Boolean),
+        ...meetingDoc.action_items
+          .map((item) => item.jira_reference)
+          .filter(Boolean)
+          .map((ref) => String(ref).match(/\b[A-Z][A-Z0-9]+-\d+\b/)?.[0])
+          .filter(Boolean),
+      ]),
+    ];
+
+    const issueUrlMap = Object.fromEntries(
+      dynamicIssueKeys.map((key) => [key, buildIssueUrl(key)])
+    );
+
+    const documentTitle = buildDocumentTitle(meetingDoc);
+
+    const confluenceHtml = sanitizeConfluenceHtml(
+      renderConfluenceStorage(meetingDoc, {
+        assigneeDirectory,
+        issueUrlMap,
+        dynamicIssueKeys,
+      })
+    );
 
     const momJsonPath = path.join(MOM_DIR, `${runId}.json`);
     const momHtmlPath = path.join(CONFLUENCE_DRAFTS_DIR, `${runId}.html`);
     const runSummaryPath = path.join(LOGS_DIR, `${runId}.json`);
 
-    await writeJson(momJsonPath, meetingDoc);
+    await writeJson(momJsonPath, {
+      ...meetingDoc,
+      document_title: documentTitle,
+      dynamic_issue_keys: dynamicIssueKeys,
+      resolved_assignees: assigneeDirectory,
+    });
+
     await fs.writeFile(momHtmlPath, confluenceHtml, 'utf8');
 
     const confluenceResult = await confluenceClient.callTool('create_confluence_page', {
       spaceKey: requireEnv('CONFLUENCE_SPACE_KEY'),
       parentPageId: process.env.CONFLUENCE_PARENT_PAGE_ID || undefined,
-      title: meetingDoc.meeting_metadata.meeting_title,
+      title: documentTitle,
       content: confluenceHtml,
     });
 
@@ -522,12 +796,18 @@ async function processTranscript(transcriptFile) {
       );
     }
 
+    const unresolvedAssignees = meetingDoc.action_items
+      .filter((item) => !item.assignee_confluence_account_id && item.assignee)
+      .map((item) => item.assignee);
+
     const summary = {
       success: true,
       runId,
       transcriptFile,
       jiraKeys,
       speakerHints,
+      documentTitle,
+      unresolvedAssignees,
       outputs: {
         momJsonPath,
         momHtmlPath,
