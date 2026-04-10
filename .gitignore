@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+transcripts/
+output/
+.DS_Store
+process-with-siemensgpt.js
+
