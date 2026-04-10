@@ -215,6 +215,7 @@ function renderConfluenceStorage(doc) {
     <ul>${nextStepsHtml}</ul>
     <h2>Risks / Open Questions</h2>
     <ul>${risksHtml}</ul>
+    <h4><i>AI generated meeting notes</i></h4>
   `
     .replace(/\n\s*/g, ' ')
     .trim();
@@ -228,6 +229,12 @@ function sanitizeConfluenceHtml(html) {
     .replace(/–/g, '-')
     .replace(/—/g, '-')
     .replace(/…/g, '...')
+    .replace(/\u202F/g, ' ')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u2011/g, '-')
+    .replace(/\u2013/g, '-')
+    .replace(/\u2014/g, '-')
+    .replace(/\u2192/g, '->')
     .trim();
 }
 
