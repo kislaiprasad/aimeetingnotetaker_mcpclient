@@ -143,6 +143,13 @@ Rules:
 - Deduplicate attendees strictly
 - If Jira issues are discussed, use their keys from Jira context
 - Return a concise, human-readable meeting title if it can be inferred
+- Look for mentions of:
+  - Feature names
+  - Project keys (e.g., "EPNABTPL-1234", "BTCPQ2TL-1234")
+  - Epic names
+  - Story titles
+  - Bug references
+- Search Jira for these references using the "search_jira_issues" tool
 
 Transcript:
 ${safeTranscript}

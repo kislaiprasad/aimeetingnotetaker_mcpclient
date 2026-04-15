@@ -11,7 +11,8 @@
     "jira-server": "node mcp-servers/jira-server.js",
     "confluence-server": "node mcp-servers/confluence-server.js",
     "test-jira": "node mcp-servers/jira-server.js",
-    "test-confluence": "node mcp-servers/confluence-server.js"
+    "test-confluence": "node mcp-servers/confluence-server.js",
+    "start-api": "node server/api-server.js"
   },
   "keywords": ["mcp", "jira", "confluence", "meeting", "automation"],
   "author": "Kislai Prasad",

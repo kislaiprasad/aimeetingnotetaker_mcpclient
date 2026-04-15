@@ -7,7 +7,11 @@ import { renderConfluenceStorage, buildDocumentTitle, buildIssueUrl, getTextCont
 import path from 'path';
 import { PATHS } from './config.js';
 
-export async function runMeetingApp(transcriptFile) {
+export async function runMeetingApp({
+  transcriptFile,
+  spaceKey,
+  parentPageId
+  }) {
   await ensureDirectories();
 
   const rawTranscript = await readTranscriptFile(transcriptFile);
@@ -91,12 +95,31 @@ export async function runMeetingApp(transcriptFile) {
       resolved_assignees: assigneeDirectory,
     };
 
-    const confluenceResult = await confluenceClient.callTool('create_confluence_page', {
-      spaceKey: requireEnv('CONFLUENCE_SPACE_KEY'),
-      parentPageId: process.env.CONFLUENCE_PARENT_PAGE_ID || undefined,
-      title: documentTitle,
-      content: confluenceHtml,
-    });
+    const resolvedSpaceKey =
+      spaceKey ||
+      process.env.CONFLUENCE_SPACE_KEY;
+
+    const resolvedParentPageId =
+      parentPageId ||
+      process.env.CONFLUENCE_PARENT_PAGE_ID;
+
+    const confluenceResult =
+      await confluenceClient.callTool(
+        "create_confluence_page",
+        {
+          spaceKey:
+            resolvedSpaceKey,
+
+          parentPageId:
+            resolvedParentPageId,
+
+          title:
+            documentTitle,
+
+          content:
+            confluenceHtml,
+        }
+      );
 
     const createdPage = JSON.parse(getTextContent(confluenceResult));
 

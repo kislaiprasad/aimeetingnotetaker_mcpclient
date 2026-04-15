@@ -7,7 +7,7 @@ if (!transcriptFile) {
   process.exit(1);
 }
 
-runMeetingApp(transcriptFile).catch((error) => {
+runMeetingApp({transcriptFile}).catch((error) => {
   console.error(JSON.stringify({ success: false, error: error.message }, null, 2));
   process.exit(1);
 });
